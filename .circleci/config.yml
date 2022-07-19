@@ -1,0 +1,151 @@
+version: 2.1
+
+orbs:
+  aws-ecr: circleci/aws-ecr@7.3.0
+  aws-ecs: circleci/aws-ecs@2.2.1
+  aws-s3: circleci/aws-s3@3.0.0
+
+executors:
+  back:
+    docker:
+      - image: circleci/ruby:2.7.5-node-browsers
+        environment:
+          RAILS_ENV: 'test'
+          TZ: 'Asia/Tokyo'
+      - image: circleci/mysql:8.0.28
+        command: mysqld --default-authentication-plugin=mysql_native_password
+        environment:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'true'
+          MYSQL_ROOT_HOST: '%'
+  front:
+    docker:
+      - image: circleci/node:16.13
+
+jobs:
+  build-and-test-backend:
+    executor: back
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependecies-{{ checksum "backend/Gemfile.lock" }}
+            - v1-dependecies-
+      - run:
+          name: install dependencies
+          command: |
+            bundle install --jobs=4 --retry=3 --gemfile=backend/Gemfile
+      - save_cache:
+          paths:
+            - ./vendor/bundle
+          key: v1-dependencies-{{ checksum "backend/Gemfile.lock" }}
+      - run: mv backend/config/database.yml.ci backend/config/database.yml
+      - run:
+          working_directory: backend
+          command: |
+            bundle exec rake db:create
+            bundle exec rake db:schema:load
+      - run:
+          name: Rubocop
+          working_directory: backend
+          command: bundle exec rubocop
+      - run:
+          name: RSpec
+          working_directory: backend
+          command: |
+            mkdir /tmp/test-results
+            TEST_FILES="$(circleci tests glob "spec/**/*_spec.rb" | \
+              circleci tests split --split-by=timings)"
+            bundle exec rspec \
+              --format progress --format RspecJunitFormatter \
+              --out /tmp/test-results/rspec.xml \
+              $TEST_FILES
+      - store_test_results:
+          path: /tmp/test-results
+      - store_artifacts:
+          path: /tmp/test-results
+          destination: test-results
+
+  build-and-test-frontend:
+    executor: front    
+    steps:
+      - checkout
+      - restore_cache:
+          key: v1-dependencies-cache-{{ checksum "frontend/package.json" }}
+      - run: 
+          working_directory: frontend
+          command: npm install
+      - save_cache:
+          key: v1-dependencies-cache-{{ checksum "frontend/package.json" }}
+          paths:
+            - node_modules
+      - run:
+          name: prettier VueTestUtils by Jest
+          working_directory: frontend
+          command: |
+            npm run format
+            npm run test
+      - run:
+          name: Build
+          working_directory: frontend
+          command: npm run build
+      - persist_to_workspace:
+          root: frontend
+          paths:
+            - .
+      
+  deploy-frontend:
+    executor: front    
+    steps:
+      - attach_workspace:
+          at: .
+      - aws-s3/sync:
+          from: ./dist
+          to: 's3://terraform-e-production-static-bucket'
+
+workflows:
+  ci_cd_pipeline:
+    jobs:
+      - build-and-test-backend:
+          filters:
+            branches:
+              only: master
+      - aws-ecr/build-and-push-image:
+          name: 'rails-build-and-push-image'
+          filters:
+            branches:
+              only: master
+          repo: terraform-e-production-backend-rails-repo
+          dockerfile: backend/Dockerfile.production
+          extra-build-args: '--build-arg RAILS_MASTER_KEY=${RAILS_MASTER_KEY}'
+      - aws-ecr/build-and-push-image:
+          name: 'nginx-build-and-push-image'
+          filters:
+            branches:
+              only: master
+          requires:
+            - rails-build-and-push-image
+          repo: terraform-e-production-web-nginx-repo
+          dockerfile: web/Dockerfile.production
+      - aws-ecs/deploy-service-update:
+          filters:
+            branches:
+              only: master
+          requires:
+            - nginx-build-and-push-image
+          cluster-name: 'terraform-e-production-ecs-application-cluster'
+          service-name: 'terraform-e-production-ecs-application-service'
+          family: 'terraform-e-production-ecs-application-task-def'
+          deployment-controller: 'CODE_DEPLOY'
+          codedeploy-application-name: 'terraform-e-production-codedeploy-app'
+          codedeploy-deployment-group-name: 'terraform-e-production-codedeploy-dg'
+          codedeploy-load-balanced-container-name: 'nginx-container'
+      - build-and-test-frontend:
+          filters:
+            branches:
+              only: master
+      - deploy-frontend:
+          filters:
+            branches:
+              only: master
+          requires: 
+            - build-and-test-frontend

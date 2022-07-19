@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+
+  db:
+    image: mysql:8.0.28
+    command: --default-authentication-plugin=mysql_native_password
+    volumes: 
+      - "./db:/var/lib/mysql"
+      - "./db/personal_config/my.cnf:/etc/mysql/conf.d/my.cnf"
+    environment:
+      MYSQL_ROOT_PASSWORD: $MYSQL_ROOT_PASSWORD
+      TZ: Asia/Tokyo
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        WORKDIR: $WORKDIR
+    volumes:
+      - "./backend:/$WORKDIR"
+    environment:
+      MYSQL_ROOT_PASSWORD: $MYSQL_ROOT_PASSWORD
+    ports:
+      - "8000:3000"
+    depends_on:
+      - db
+
+  web:
+    build:
+      context: ./web
+    volumes:
+      - ./web:/app/public
+      - ./backend/tmp/sockets:/app/tmp/sockets
+    ports:
+      - 80:80
+    depends_on:
+      - backend
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        WORKDIR: $WORKDIR
+    volumes:
+      - "./frontend:/$WORKDIR"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend

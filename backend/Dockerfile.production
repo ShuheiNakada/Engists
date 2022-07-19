@@ -1,0 +1,37 @@
+FROM ruby:2.7.5-alpine3.13
+
+ARG RUNTIME_PACKAGES="bash imagemagick nodejs yarn tzdata mysql-dev mysql-client git"
+ARG DEV_PACKAGES="build-base curl-dev"
+
+### 手動でイメージをpushする際はコメントアウトする
+### (CircleCIから環境変数を受け取っている)
+ARG RAILS_MASTER_KEY
+ENV RAILS_MASTER_KEY ${RAILS_MASTER_KEY}
+
+WORKDIR /app
+
+RUN mkdir -p tmp/sockets
+
+ENV RAILS_ENV="production" \
+    HOME=/app \
+    TZ=Asia/Tokyo
+
+COPY backend/Gemfile* ./
+
+RUN apk update && \
+    apk upgrade && \
+    apk add --no-cache ${RUNTIME_PACKAGES} && \
+    apk add --virtual build-dependencies --no-cache ${DEV_PACKAGES} && \
+    bundle install -j4 && \
+    apk del build-dependencies
+
+COPY backend ./
+
+COPY backend/entrypoint.production.sh /usr/bin/
+RUN chmod +x /usr/bin/entrypoint.production.sh
+ENTRYPOINT ["entrypoint.production.sh"]
+
+VOLUME /app/public
+VOLUME /app/tmp
+
+CMD ["bundle", "exec", "puma", "-C", "config/puma.rb"]

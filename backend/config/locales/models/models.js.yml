@@ -1,0 +1,9 @@
+ja:
+  activerecord:
+    attributes:
+      comment:
+        category: カテゴリー
+        title: タイトル
+        content: コメント本文
+      message:
+        content: メッセージ本文
